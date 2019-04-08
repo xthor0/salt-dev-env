@@ -1,0 +1,10 @@
+[Unit]
+Description=Template Cleanup Script
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStop=/usr/local/bin/template_cleanup.sh
+
+[Install]
+WantedBy=multi-user.target

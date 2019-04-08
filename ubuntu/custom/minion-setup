@@ -1,0 +1,77 @@
+#!/bin/bash
+
+# meant to be run via systemd on a vbox minion
+# an easier way to deploy since salt-cloud doesn't work
+
+function comment() {
+# I have seen a few instances where this error popped up:
+
+# VBoxControl: error: Could not contact the host system.  Make sure that you are running this
+# VBoxControl: error: application inside a VirtualBox guest system, and that you have sufficient
+# VBoxControl: error: user permissions.
+
+# It looks like the script is running just a few seconds before the kernel module is loaded.
+# This loop should fix that.
+
+retval=1
+attempt=0
+maxattempts=10
+while [ ${retval} -eq 1 ]; do 
+  dmesg | grep -q 'vboxguest: Successfully loaded'
+  if [ $? -eq 0 ]; then
+    echo "vboxguest kernel module loaded, proceeding..."
+    break
+  else
+    let attempt+=1
+    if [ ${attempt} -ge ${maxattempts} ]; then
+      echo "ERROR: vboxguest kernel module is not loaded - waited 10 seconds. Exiting."
+      exit 255
+    else
+      echo "vboxguest kernel module has not loaded, sleeping..."
+      sleep 1
+    fi
+  fi
+done
+}
+
+# get the new hostname
+newHostName=$(VBoxControl --nologo guestproperty get GuestName | awk '{ print $2 }')
+
+# make sure the result isn't zero length (indicating VBoxControl doesn't work), or "value" (not set)
+if [ ${#newHostName} -eq 0 ]; then
+  echo "vbox guest property not set - exiting."
+  exit 255
+elif [ "${newHostName}" == "value" ]; then
+  echo "vbox guest property not set - exiting."
+  exit 255
+fi
+
+# set the hostname
+hostnamectl set-hostname ${newHostName}.lab
+
+# statically set the hostname in Salt
+echo ${newHostName}.lab > /etc/salt/minion_id
+
+# point the minion at the right master
+echo "master: 10.187.88.10" | tee /etc/salt/minion
+
+# regenerate UUID, otherwise Ubuntu acts totally stupid
+if [ -f /etc/machine-id ]; then
+  # required for ubuntu 18.04
+  rm -f /etc/machine-id && dbus-uuidgen --ensure=/etc/machine-id
+fi
+
+# start Salt minion next boot
+systemctl enable salt-minion
+
+# get rid of the evidence
+systemctl disable minion-setup
+rm /etc/systemd/system/minion-setup.service
+systemctl daemon-reload
+
+# reboot after burying the body
+(sleep 5; reboot &)&
+rm -f ${0}
+
+# fin
+exit 0

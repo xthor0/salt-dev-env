@@ -1,0 +1,14 @@
+[Unit]
+Description=Bootstrap Salt
+After=vboxadd.target virtualbox-guest-utils.service network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/minion-setup
+RemainAfterExit=True
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=minion-setup
+
+[Install]
+WantedBy=multi-user.target
