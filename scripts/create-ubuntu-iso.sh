@@ -48,6 +48,15 @@ else
     exit 255
 fi
 
+# verify all binaries are present
+for binary in wget curl genisoimage sha256sum; do
+    which ${binary} >& /dev/null
+    if [ $? -eq 1 ]; then
+        echo "Unable to locate ${binary} - please install and run this script again."
+        exit 255
+    fi
+done
+
 # name of output file
 output="ubuntu-${outfile}-$(date +%Y%m%d).iso"
 
@@ -59,9 +68,9 @@ fi
 pushd "${build}"
 
 # download the SHA512SUMS file
-wget -q ${shatxt}
+hash=$(curl -s ${shatxt} | grep ${isoname} | awk '{ print $1 }')
 if [ $? -eq 0 ]; then
-    echo "$(grep ${isoname} SHA256SUMS | awk '{ print $1 }')  ${isoname}" > sha.txt
+    echo "${hash}  ${isoname}" > sha.txt
 else
     echo "Error: Unable to download ${shatxt}. Exiting."
     exit 255
@@ -85,6 +94,11 @@ if [ $? -eq 0 ]; then
 else
     echo "Unable to download ISO."
     exit 255
+fi
+
+# get rid of the extract directory if it exists from a previous run
+if [ -d x ]; then
+    rm -rf x 
 fi
 
 # extract the ISO
