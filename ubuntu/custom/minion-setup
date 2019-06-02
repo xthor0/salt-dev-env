@@ -49,11 +49,17 @@ fi
 # set the hostname
 hostnamectl set-hostname ${newHostName}.lab
 
-# statically set the hostname in Salt
-echo ${newHostName}.lab > /etc/salt/minion_id
+# only do this if Salt is installed
+if [ -d /etc/salt ]; then
+  # statically set the hostname in Salt
+  echo ${newHostName}.lab > /etc/salt/minion_id
 
-# point the minion at the right master
-echo "master: 10.187.88.10" | tee /etc/salt/minion
+  # point the minion at the right master
+  echo "master: 10.187.88.10" | tee /etc/salt/minion
+  
+  # start Salt minion next boot
+  systemctl enable salt-minion
+fi
 
 # regenerate UUID, otherwise Ubuntu acts totally stupid
 if [ -f /etc/machine-id ]; then
@@ -61,13 +67,16 @@ if [ -f /etc/machine-id ]; then
   rm -f /etc/machine-id && dbus-uuidgen --ensure=/etc/machine-id
 fi
 
-# start Salt minion next boot
-systemctl enable salt-minion
-
 # get rid of the evidence
-systemctl disable minion-setup
-rm /etc/systemd/system/minion-setup.service
-systemctl daemon-reload
+if [ -f /etc/systemd/system/minion-setup.service ]; then
+  systemctl disable minion-setup
+  rm /etc/systemd/system/minion-setup.service
+  systemctl daemon-reload
+fi
+
+if [ -f /etc/init/minion-setup.conf ]; then
+  rm -f /etc/init/minion-setup.conf
+fi
 
 # reboot after burying the body
 (sleep 5; reboot &)&

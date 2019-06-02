@@ -1,14 +1,10 @@
 #!/bin/bash
 
 # variables
-source="http://cdimage.ubuntu.com/releases/18.04.2/release/ubuntu-18.04.2-server-amd64.iso"
-shatxt="http://cdimage.ubuntu.com/releases/18.04.2/release/SHA256SUMS"
 build="$HOME/tmp/ubuntu-iso"
-shaname=$(basename ${shatxt})
-isoname=$(basename ${source})
 
 # we need command-line options
-while getopts "p:f:c:" opt; do
+while getopts "p:f:c:v:" opt; do
 	case $opt in
 		p)
 			preseed=$OPTARG
@@ -19,6 +15,8 @@ while getopts "p:f:c:" opt; do
 		c)
 			custom=$OPTARG
 			;;
+        v)
+            version=${OPTARG};;
 	esac
 done
 
@@ -40,6 +38,26 @@ if [ -z "$custom" ]; then
     exit 255
 fi
 
+# make sure an Ubuntu version was specified
+if [ -z "${version}" ]; then
+    echo "You must specify the version of Ubuntu to use."
+    exit 255
+fi
+
+# make sure a valid release number was specified
+ubvers=$(curl -s http://mirrors.xmission.com/ubuntu-cd/ | sed -e 's/<[^>]*>//g' | grep '^[0-9]' | cut -d \/ -f 1 | tr \\n ' ')
+if [ $? -eq 0 ]; then
+    echo ${ubvers} | grep -qw ${version}
+    if [ $? -ne 0 ]; then
+        echo "Invalid Ubuntu version specified. Valid Ubuntu versions:"
+        echo ${ubvers}
+        exit 255
+    fi
+else
+    echo "Error downloading list of Ubuntu releases from http://mirrors.xmission.com/ubuntu-cd/ - exiting."
+    exit 255
+fi
+
 # make sure the preseed file exists
 if [ -f "${preseed}" ]; then
     echo "Using preseed file: ${preseed}"
@@ -58,7 +76,13 @@ for binary in wget curl genisoimage sha256sum; do
 done
 
 # name of output file
-output="ubuntu-${outfile}-$(date +%Y%m%d).iso"
+output="ubuntu-${version}-${outfile}-$(date +%Y%m%d).iso"
+
+# set variables for where we'll download the ISO and SHASUM file
+source="http://mirrors.xmission.com/ubuntu-cd/${version}/ubuntu-${version}-server-amd64.iso"
+shatxt="http://mirrors.xmission.com/ubuntu-cd/${version}/SHA256SUMS"
+shaname=$(basename ${shatxt})
+isoname=$(basename ${source})
 
 # create the build directory
 if [ ! -d "${build}" ]; then
@@ -102,21 +126,49 @@ if [ -d x ]; then
 fi
 
 # extract the ISO
-7z -ox x ${isoname}
+# unfortunately, 7z truncates the damn files... so...
+#7z -ox x ${isoname}
+#if [ $? -ne 0 ]; then
+#    echo "Failed to extract ${isoname} -- exiting."
+#    exit 255
+#fi
+echo "You will be prompted for your sudo password to mount the ISO."
+mkdir iso_src && sudo mount -o loop ${isoname} iso_src
 if [ $? -ne 0 ]; then
-    echo "Failed to extract ${isoname} -- exiting."
+    echo "Error: Unable to mount ISO."
+fi
+
+# create a target directory, and copy the ISO source to it
+echo "Copying iso contents to new directory..."
+cp -ar iso_src iso_tgt
+if [ $? -ne 0 ]; then
+    echo "Error copying mounted ISO files to new directory."
+    exit 255
+fi
+
+# unmount iso
+echo "You will be prompted for your sudo password to unmount the ISO."
+sudo umount iso_src
+if [ $? -ne 0 ]; then
+    echo "error unmounting ISO - you'll see other errors below."
+fi
+
+# set permissions, or we can't modify anything (stupid iso)
+chmod -R u+w iso_tgt
+if [ $? -ne 0 ]; then
+    echo "Error: unable to set permissions on iso_tgt -- exiting."
     exit 255
 fi
 
 # copy in the custom dir
-mkdir x/custom && cp -ar ${custom}/* x/custom
+mkdir iso_tgt/custom && cp -ar ${custom}/* iso_tgt/custom
 if [ $? -ne 0 ]; then
     echo "Failed to copy ${custom} to ISO root -- exiting."
     exit 255
 fi
 
 # replace isolinux.cfg
-cat << EOF > x/isolinux/isolinux.cfg 
+cat << EOF > iso_tgt/isolinux/isolinux.cfg 
 default linux
 timeout 200
 
@@ -131,7 +183,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # inject preseed.cfg
-cp ${preseed} x/preseed.cfg
+cp ${preseed} iso_tgt/preseed.cfg
 if [ $? -ne 0 ]; then
     echo "Error copying ${preseed} -- exiting."
     exit 255
@@ -139,10 +191,13 @@ fi
 
 # generate ISO
 echo "Generating ISO: ${build}/${output}"
-genisoimage -quiet -r -J -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o ${build}/${output} x
+#genisoimage -quiet -D -l -r -J -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o ${build}/${output} x
+mkisofs -D -r -V "UBUNTU_${version}" -cache-inodes -J -l -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o ${build}/${output} iso_tgt
 if [ $? -eq 0 ]; then
     # cleanup
-    rm -rf x ${shaname} sha.txt
+    rm -rf iso_src iso_tgt ${shaname} sha.txt
+
+    echo "ISO written: ${build}/${output}"
 else
     echo "Error generating ISO."
 fi
