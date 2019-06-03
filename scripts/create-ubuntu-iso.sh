@@ -67,7 +67,7 @@ else
 fi
 
 # verify all binaries are present
-for binary in wget curl genisoimage sha256sum; do
+for binary in wget curl genisoimage sha256sum archivemount pv rsync; do
     which ${binary} >& /dev/null
     if [ $? -eq 1 ]; then
         echo "Unable to locate ${binary} - please install and run this script again."
@@ -120,45 +120,57 @@ else
     exit 255
 fi
 
-# get rid of the extract directory if it exists from a previous run
-if [ -d x ]; then
-    rm -rf x 
-fi
+# make sure a previous run has been cleaned up
+# and then re-create necessary directories
+for dir in iso_src iso_tgt iso_new; do
+    if [ -d ${dir} ]; then
+        rm -rf ${dir}
+        if [ $? -ne 0 ]; then
+            echo "Error removing ${dir} -- exiting!"
+            exit 255
+        fi
+    fi
+done
 
-# extract the ISO
-# unfortunately, 7z truncates the damn files... so...
-#7z -ox x ${isoname}
-#if [ $? -ne 0 ]; then
-#    echo "Failed to extract ${isoname} -- exiting."
-#    exit 255
-#fi
-echo "You will be prompted for your sudo password to mount the ISO."
-mkdir iso_src && sudo mount -o loop ${isoname} iso_src
+# mount the ISO
+mkdir iso_src && archivemount -o readonly ${isoname} iso_src
 if [ $? -ne 0 ]; then
     echo "Error: Unable to mount ISO."
 fi
 
-# create a target directory, and copy the ISO source to it
-echo "Copying iso contents to new directory..."
-cp -ar iso_src iso_tgt
+# I spent way too much time on this! it's a nice progress bar to show the copy progress!
+# du would have been easier, but it showed twice as much data for some reason
+total_bytes=$(rsync --dry-run --stats -a iso_src | grep 'total size' | awk '{ print $4 }' | tr -d ,)
+
+echo "Copying iso contents to new directory, but fuse mounts are slow. Be patient."
+mkdir iso_new
+tar c iso_src | pv -s ${total_bytes} | tar x -C iso_new
 if [ $? -ne 0 ]; then
     echo "Error copying mounted ISO files to new directory."
     exit 255
 fi
 
 # unmount iso
-echo "You will be prompted for your sudo password to unmount the ISO."
-sudo umount iso_src
+fusermount -u iso_src
 if [ $? -ne 0 ]; then
     echo "error unmounting ISO - you'll see other errors below."
 fi
 
 # set permissions, or we can't modify anything (stupid iso)
-chmod -R u+w iso_tgt
+chmod -R u+w iso_new
 if [ $? -ne 0 ]; then
-    echo "Error: unable to set permissions on iso_tgt -- exiting."
+    echo "Error: unable to set permissions on iso_new -- exiting."
     exit 255
 fi
+
+# move the iso_new/iso_src directory to the right location
+mv iso_new/iso_src iso_tgt
+if [ $? -ne 0 ]; then
+    echo "Error: can't move iso_new/iso_src to iso_tgt -- exiting."
+    exit 255
+fi
+
+#read -p "Press Enter to continue" discardme
 
 # copy in the custom dir
 mkdir iso_tgt/custom && cp -ar ${custom}/* iso_tgt/custom
@@ -191,13 +203,10 @@ fi
 
 # generate ISO
 echo "Generating ISO: ${build}/${output}"
-#genisoimage -quiet -D -l -r -J -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o ${build}/${output} x
-mkisofs -D -r -V "UBUNTU_${version}" -cache-inodes -J -l -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o ${build}/${output} iso_tgt
+genisoimage -quiet -D -l -r -J -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o ${build}/${output} iso_tgt
 if [ $? -eq 0 ]; then
     # cleanup
-    rm -rf iso_src iso_tgt ${shaname} sha.txt
-
-    echo "ISO written: ${build}/${output}"
+    rm -rf iso_src iso_tgt sha.txt
 else
     echo "Error generating ISO."
 fi
