@@ -2,6 +2,7 @@
 
 # meant to be run via systemd on a vbox minion
 # an easier way to deploy since salt-cloud doesn't work
+status_file=/root/.minion-setup-complete
 
 function comment() {
 # I have seen a few instances where this error popped up:
@@ -33,6 +34,36 @@ while [ ${retval} -eq 1 ]; do
   fi
 done
 }
+
+# check the status file - if we're in a DONE status, let's send a notification
+# and disable the service from ever starting again.
+if [ -f ${status_file} ]; then
+  grep -q done ${status_file}
+  if [ $? -eq 0 ]; then
+    echo "Minion setup complete - notifying pushover"
+    echo completed > ${status_file}
+
+    # make sure the services don't start at boot again
+    if [ -f /etc/systemd/system/minion-setup.service ]; then
+      systemctl disable minion-setup
+    fi
+
+    if [ -f /etc/init/minion-setup.conf ]; then
+      echo manual | sudo tee /etc/init/minion-setup.override
+    fi
+
+    # pushover notification that we're done
+    curl -s \
+      --form-string "token=ajuzqvz9huyfdt72iuj2itkcn7d13p" \
+      --form-string "user=uiLUuynXsvF7UCQATr3j6j7pG7dGoh" \
+      --form-string "message=Notification: ${HOSTNAME} VM build has completed" \
+    https://api.pushover.net/1/messages.json
+    exit 0
+  else
+    echo "Minion has already been set up."
+    exit 0
+  fi
+fi
 
 # get the new hostname
 newHostName=$(VBoxControl --nologo guestproperty get GuestName | awk '{ print $2 }')
@@ -67,20 +98,27 @@ if [ -f /etc/machine-id ]; then
   rm -f /etc/machine-id && dbus-uuidgen --ensure=/etc/machine-id
 fi
 
-# get rid of the evidence
-if [ -f /etc/systemd/system/minion-setup.service ]; then
-  systemctl disable minion-setup
-  rm /etc/systemd/system/minion-setup.service
-  systemctl daemon-reload
+# resize the hard drive
+freespace=$(sfdisk -Fq /dev/sda | wc -l)
+re='^[0-9]+$'
+if ! [[ ${freespace} =~ ${re} ]] ; then
+   echo "Error - unable to determine status of free space - exiting."
+   exit 255
 fi
 
-if [ -f /etc/init/minion-setup.conf ]; then
-  rm -f /etc/init/minion-setup.conf
+if [ ${freespace} -eq 0 ]; then
+  # disk is fully utilized - expand the partition
+  resize2fs /dev/sda1
+else
+  echo ", +" | sfdisk --no-reread -N 1 /dev/sda
+  reboot
 fi
 
-# reboot after burying the body
-(sleep 5; reboot &)&
-rm -f ${0}
+# don't run this next boot!
+echo done > ${status_file}
+
+# reboot!
+reboot
 
 # fin
 exit 0

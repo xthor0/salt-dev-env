@@ -2,9 +2,10 @@
 
 # variables
 build="$HOME/tmp/ubuntu-iso"
+sourceURL="cdimage.ubuntu.com"
 
 # we need command-line options
-while getopts "p:f:c:v:" opt; do
+while getopts "p:f:c:v:l" opt; do
 	case $opt in
 		p)
 			preseed=$OPTARG
@@ -17,8 +18,32 @@ while getopts "p:f:c:v:" opt; do
 			;;
         v)
             version=${OPTARG};;
+        l)
+            listvers=yes;;
 	esac
 done
+
+# retrieve list of ubuntu versions
+echo "Retrieving list of Ubuntu releases..."
+ubvers=$(curl -s http://${sourceURL}/releases/ | sed -e 's/<[^>]*>//g' | grep '^[0-9]' | cut -d \/ -f 1 | tr \\n ' ')
+if [ -n "${ubvers}" ]; then
+    # if the arg is passed to list - just list and exit. Otherwise, validate the version passed on the command-line.
+    if [ -n "${listvers}" ]; then
+            echo "Valid Ubuntu versions:"
+            echo ${ubvers}
+            exit 0
+    else
+        echo ${ubvers} | grep -qw ${version}
+        if [ $? -ne 0 ]; then
+            echo "Invalid Ubuntu version specified. Valid Ubuntu versions:"
+            echo ${ubvers}
+            exit 255
+        fi
+    fi
+else
+    echo "Error downloading list of Ubuntu releases from http://${sourceURL}/releases/ - exiting."
+    exit 255
+fi
 
 # validate arguments...
 if [ -z "${preseed}" ]; then
@@ -44,20 +69,6 @@ if [ -z "${version}" ]; then
     exit 255
 fi
 
-# make sure a valid release number was specified
-ubvers=$(curl -s http://mirrors.xmission.com/ubuntu-cd/ | sed -e 's/<[^>]*>//g' | grep '^[0-9]' | cut -d \/ -f 1 | tr \\n ' ')
-if [ $? -eq 0 ]; then
-    echo ${ubvers} | grep -qw ${version}
-    if [ $? -ne 0 ]; then
-        echo "Invalid Ubuntu version specified. Valid Ubuntu versions:"
-        echo ${ubvers}
-        exit 255
-    fi
-else
-    echo "Error downloading list of Ubuntu releases from http://mirrors.xmission.com/ubuntu-cd/ - exiting."
-    exit 255
-fi
-
 # make sure the preseed file exists
 if [ -f "${preseed}" ]; then
     echo "Using preseed file: ${preseed}"
@@ -79,10 +90,28 @@ done
 output="ubuntu-${version}-${outfile}-$(date +%Y%m%d).iso"
 
 # set variables for where we'll download the ISO and SHASUM file
-source="http://mirrors.xmission.com/ubuntu-cd/${version}/ubuntu-${version}-server-amd64.iso"
-shatxt="http://mirrors.xmission.com/ubuntu-cd/${version}/SHA256SUMS"
-shaname=$(basename ${shatxt})
-isoname=$(basename ${source})
+#source="http://${sourceURL}/releases/${version}/release/ubuntu-${version}-server-amd64.iso"
+shatxt="http://${sourceURL}/releases/${version}/release/SHA256SUMS"
+
+# try to find the amd64 ISO - the names have been (weirdly) changed (i.e. amd64+mac)
+shadata=$(curl -s ${shatxt} | grep ${version}-server-amd64)
+
+if [ ${#shadata} -eq 0 ]; then
+    echo "Unable to determine ISO name - run some debugging!"
+    exit 255
+fi
+
+# split out the shadata variable into array
+sharr=(${shadata})
+# element 0 is the SHA256SUM, element 1 is the name of the ISO
+hash=${sharr[0]}
+isoname=${sharr[1]}
+
+# if we have more than 2 elements - then we got too many matches
+if [ -n "${shadata[2]}" ]; then
+    echo "More than one ISO found - run some debugging!"
+    exit 255
+fi
 
 # create the build directory
 if [ ! -d "${build}" ]; then
@@ -91,16 +120,13 @@ fi
 
 pushd "${build}"
 
-# download the SHA512SUMS file
-hash=$(curl -s ${shatxt} | grep ${isoname} | awk '{ print $1 }')
-if [ $? -eq 0 ]; then
-    echo "${hash}  ${isoname}" > sha.txt
-else
-    echo "Error: Unable to download ${shatxt}. Exiting."
-    exit 255
-fi
+# generate a shasum file
+echo "${hash}  ${isoname}" > sha.txt
 
-# download the netinst ISO
+# set a variable representing the ISO for download
+source="http://${sourceURL}/releases/${version}/release/${isoname}"
+
+# download the ISO
 if [ -f ${isoname} ]; then
     echo "${isoname} has already been downloaded."
 else
@@ -112,7 +138,7 @@ fi
 if [ $? -eq 0 ]; then
     sha256sum -c sha.txt
     if [ $? -ne 0 ]; then
-        echo "Failed to verify SHA512SUM of ${isoname} -- exiting."
+        echo "Failed to verify SHA256SUM of ${isoname} -- exiting."
         exit 255
     fi
 else
@@ -180,7 +206,8 @@ if [ $? -ne 0 ]; then
 fi
 
 # replace isolinux.cfg
-cat << EOF > iso_tgt/isolinux/isolinux.cfg 
+if [[ ${version} =~ 18.04 ]]; then
+    cat << EOF > iso_tgt/isolinux/isolinux.cfg 
 default linux
 timeout 200
 
@@ -189,6 +216,18 @@ label linux
     kernel /install/vmlinuz
     append auto file=/cdrom/preseed.cfg vga=788 initrd=/install/initrd.gz debconf/priority=critical locale=en_US console-setup/ask_detect=false console-setup/layoutcode=us netcfg/do_not_use_netplan=true
 EOF
+else
+    cat << EOF > iso_tgt/isolinux/isolinux.cfg 
+default linux
+timeout 200
+
+label linux
+	menu label ^Install
+    kernel /install/vmlinuz
+    append auto file=/cdrom/preseed.cfg vga=788 initrd=/install/initrd.gz debconf/priority=critical locale=en_US console-setup/ask_detect=false console-setup/layoutcode=us
+EOF
+fi
+
 if [ $? -ne 0 ]; then
     echo "Failed to write isolinux.cfg -- exiting."
     exit 255
@@ -206,7 +245,7 @@ echo "Generating ISO: ${build}/${output}"
 genisoimage -quiet -D -l -r -J -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o ${build}/${output} iso_tgt
 if [ $? -eq 0 ]; then
     # cleanup
-    rm -rf iso_src iso_tgt sha.txt
+    rm -rf iso_src iso_tgt sha.txt iso_new
 else
     echo "Error generating ISO."
 fi
